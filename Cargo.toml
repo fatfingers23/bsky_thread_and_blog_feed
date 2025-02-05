@@ -1,0 +1,26 @@
+[package]
+name = "bsky_thread_and_blog_feed"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = "0.4.25"
+#skyfeed = "0.4.1"
+skyfeed = { path = "../skyfeed" }
+tokio = { version = "1.43.0", features = ["full", "time"] }
+rusqlite = { version = "0.33.0", features = ["bundled"] }
+chrono = "0.4.39"
+regex = "1.11.1"
+color-eyre = "0.6.3"
+crossterm = { version = "0.28.1", features = ["event-stream"] }
+ratatui = "0.29.0"
+rand = "0.9.0"
+tokio-stream = "0.1.17"
+
+[lib]
+
+[[bin]]
+name = "feed"
+
+[[bin]]
+name = "admin"

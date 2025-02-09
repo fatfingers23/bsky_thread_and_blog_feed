@@ -1,15 +1,17 @@
+use atrium_api::types::LimitedNonZeroU8;
+use bsky_thread_and_blog_feed::db::{get_posts_count, initialize_db, load_feed_from_db};
+use bsky_thread_and_blog_feed::does_the_post_belong_to_the_feed;
+use bsky_thread_and_blog_feed::models::TextInPost;
 use log::info;
-use rusqlite::{Connection, params};
-use skyfeed::{Feed, FeedHandler, FeedResult, Post, Request, Uri};
+use skyfeed::{Embed, Feed, FeedHandler, FeedResult, MediaEmbed, Post, Request, Uri};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
+use tokio_rusqlite::{Connection, params};
 
 #[tokio::main]
-async fn main() {
-    let db = Connection::open("./feed.db").expect("Failed to open database");
-    initialize_db(&db);
-
-    let db = Arc::new(Mutex::new(db));
+async fn main() -> anyhow::Result<()> {
+    let db = Connection::open("./feed.db").await?;
+    initialize_db(&db).await;
 
     let mut feed = MyFeed {
         handler: MyFeedHandler { db: db.clone() },
@@ -28,7 +30,7 @@ async fn main() {
         cleanup_task
     )
     .1
-    .expect("Starting tasks failed");
+    .expect("Starting tasks failed")
 }
 
 struct MyFeed {
@@ -43,136 +45,134 @@ impl Feed<MyFeedHandler> for MyFeed {
 
 #[derive(Clone)]
 struct MyFeedHandler {
-    db: Arc<Mutex<Connection>>,
+    db: Connection,
 }
 
 impl FeedHandler for MyFeedHandler {
     async fn insert_post(&mut self, post: Post) {
-        let cat_regex = regex::RegexBuilder::new("\\b(rust?)\\b")
-            .case_insensitive(true)
-            .build()
-            .unwrap();
-        // info!("Checking {post:?}");
-        let unwanted_regex =
-            regex::RegexBuilder::new("\\b(trump|kamala|harris|biden|democrats?|democratic|republicans?|politics|dems?|aoc|GOP|vance|musk|elon|walz|fascists?|furryart|smut|furries|dnc|RFK)\\b|(right wing|left wing)")
-                .case_insensitive(true)
-                .build()
-                .unwrap();
+        //Extracting all the Text from the post
+        let mut text_types: Vec<TextInPost> = vec![TextInPost::Post(post.text.clone())];
+        match &post.embed {
+            None => {}
+            Some(embed) => match embed {
+                Embed::Video(video) => {
+                    text_types.push(TextInPost::Video(video.alt_text.clone()));
+                }
+                Embed::External(external) => {
+                    text_types.push(TextInPost::External(external.title.clone()));
+                    text_types.push(TextInPost::External(external.description.clone()));
+                }
+                Embed::Quote(_) => {}
+                Embed::QuoteWithMedia(_, media_embedded) => match media_embedded {
+                    MediaEmbed::Images(images) => {
+                        for image in images {
+                            text_types.push(TextInPost::Picture(image.alt_text.clone()));
+                        }
+                    }
+                    MediaEmbed::Video(_) => {}
+                    MediaEmbed::External(_) => {}
+                },
+                Embed::Images(images) => {
+                    for image in images {
+                        text_types.push(TextInPost::Picture(image.alt_text.clone()));
+                    }
+                }
+            },
+        }
 
-        if cat_regex.is_match(post.text.as_str())
-            && !unwanted_regex.is_match(post.text.as_str())
-            && post.labels.is_empty()
-        {
-            info!("Storing {post:?}");
-            let db = self.db.lock().await;
-
-            db.execute(
-                "INSERT OR REPLACE INTO posts (uri, text, timestamp) VALUES (?1, ?2, ?3)",
-                params![post.uri.0, post.text, post.timestamp.timestamp()],
-            )
-            .expect("Failed to insert post");
+        let save_post = does_the_post_belong_to_the_feed(text_types.clone());
+        match save_post {
+            None => {}
+            Some(scoring) => {
+                info!("Storing {post:?}");
+                let _ = self.db.call(move |db| {
+                    db.execute(
+                        "INSERT OR REPLACE INTO posts (uri, text, pinned, deleted, priority, timestamp) VALUES (?1, ?2, 0, 0, ?3, ?4)",
+                        params![ &post.uri.0, &post.text, scoring.priority, &post.timestamp.timestamp()],
+                    ).map_err(|err| err.into())
+                }).await;
+            }
         }
     }
 
     async fn delete_post(&mut self, uri: Uri) {
-        let db = self.db.lock().await;
-        db.execute("DELETE FROM posts WHERE uri = ?1", params![uri.0])
-            .expect("Failed to delete post");
+        self.db
+            .call(move |db| {
+                db.execute("DELETE FROM posts WHERE uri = ?1", params![&uri.0])
+                    .map_err(|err| err.into())
+            })
+            .await
+            .unwrap();
     }
 
     async fn like_post(&mut self, like_uri: Uri, liked_post_uri: Uri) {
-        let db = self.db.lock().await;
-        db.execute(
-            "INSERT INTO likes (post_uri, like_uri)
+        //TODO this is every single like. Maybe need to doa  in memory check instead of sqlite?
+        self.db
+            .call(move |db| {
+                db.execute(
+                    "INSERT INTO likes (post_uri, like_uri)
              SELECT ?1, ?2
              WHERE EXISTS (SELECT 1 FROM posts WHERE uri = ?1)",
-            params![liked_post_uri.0, like_uri.0],
-        )
-        .expect("Failed to like post");
+                    params![&liked_post_uri.0, &like_uri.0],
+                )
+                .map_err(|err| err.into())
+            })
+            .await
+            .unwrap();
     }
 
     async fn delete_like(&mut self, like_uri: Uri) {
-        let db = self.db.lock().await;
-        db.execute("DELETE FROM likes WHERE like_uri = ?1", params![like_uri.0])
-            .expect("Failed to delete like");
+        self.db
+            .call(move |db| {
+                db.execute("DELETE FROM likes WHERE like_uri = ?1", params![
+                    &like_uri.0
+                ])
+                .map_err(|err| err.into())
+            })
+            .await
+            .unwrap();
     }
 
     async fn serve_feed(&self, request: Request) -> FeedResult {
         // http://0.0.0.0:3030/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:plc:rnpkyqnmsw4ipey6eotbdnnf/app.bsky.feed.generator/TechThreadsAndMore&limit=5
         info!("Serving {request:?}");
-
-        let db = self.db.lock().await;
-        let mut stmt = db
-            .prepare(
-                "
-                WITH ranked_posts AS (
-                    SELECT
-                        uri,
-                        timestamp,
-                        COUNT(like_uri) AS likes
-                    FROM posts
-                    LEFT JOIN likes ON posts.uri = likes.post_uri
-                    GROUP BY posts.uri
-                    HAVING COUNT(like_uri) > 0
-                ),
-                sorted_posts AS (
-                    SELECT
-                        uri,
-                        timestamp,
-                        likes,
-                        PERCENT_RANK() OVER (ORDER BY likes DESC) AS rank
-                    FROM ranked_posts
-                )
-                SELECT uri, likes
-                FROM sorted_posts
-                WHERE rank <= 0.05
-                ORDER BY timestamp DESC;
-             ",
-            )
-            .expect("Failed to prepare statement");
-
-        let post_iter = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .expect("Failed to query posts");
-
-        let posts: Vec<Uri> = post_iter.map(|x| x.unwrap()).map(Uri).collect();
+        let posts_per_page: u8 = match request.limit {
+            None => 0,
+            Some(limit) => u8::from(limit),
+        };
 
         let start_index = request
             .cursor
             .as_deref()
             .and_then(|c| c.parse::<usize>().ok())
             .unwrap_or(0);
-        let posts_per_page = 50;
 
-        let page_posts: Vec<_> = posts
-            .iter()
-            .skip(start_index)
-            .take(posts_per_page)
-            .cloned()
-            .collect();
+        let post_uris =
+            load_feed_from_db(&self.db, posts_per_page as u64, start_index as u64).await;
+        let posts: Vec<Uri> = post_uris.into_iter().map(|post| Uri(post.uri)).collect();
 
-        let next_cursor = if start_index + posts_per_page < posts.len() {
-            Some((start_index + posts_per_page).to_string())
+        //TODO get real post len but going to use 75
+        let total_posts: u64 = get_posts_count(&self.db).await;
+        let next_cursor = if (start_index as u64) + (posts_per_page as u64) < total_posts {
+            Some(((start_index as u64) + (posts_per_page as u64)).to_string())
         } else {
             None
         };
         info!("Served {} posts", posts.len());
         FeedResult {
             cursor: next_cursor,
-            feed: page_posts,
+            feed: posts,
         }
     }
 }
 
-async fn cleanup_posts(db: &Arc<Mutex<Connection>>) {
+async fn cleanup_posts(db: &Connection) {
     const MAX_POSTS: usize = 10_000;
-
-    let cleaned_posts = db
-        .lock()
-        .await
-        .execute(
-            &format!(
-                "
+    let count = db
+        .call(|db| {
+            db.execute(
+                &format!(
+                    "
                 DELETE FROM posts
                 WHERE uri NOT IN (
                     SELECT uri
@@ -181,39 +181,18 @@ async fn cleanup_posts(db: &Arc<Mutex<Connection>>) {
                     LIMIT {MAX_POSTS}
                 );
                 "
-            ),
-            [],
-        )
-        .expect("Failed to clean up old posts");
-
-    info!("Cleaned up {cleaned_posts} posts");
-}
-
-fn initialize_db(db: &Connection) {
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS posts (
-            uri TEXT PRIMARY KEY,
-            text TEXT,
-            timestamp INTEGER
-        )",
-        [],
-    )
-    .expect("Failed to create posts table");
-
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS likes (
-            post_uri TEXT,
-            like_uri TEXT,
-            PRIMARY KEY (post_uri, like_uri),
-            FOREIGN KEY (post_uri) REFERENCES posts(uri) ON DELETE CASCADE
-        )",
-        [],
-    )
-    .expect("Failed to create likes table");
-
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_likes_post_uri ON likes(post_uri)",
-        [],
-    )
-    .expect("Failed to create index on likes.post_uri");
+                ),
+                [],
+            )
+            .map_err(|err| err.into())
+        })
+        .await;
+    match count {
+        Ok(cleaned_posts) => {
+            info!("Cleaned up {cleaned_posts} posts");
+        }
+        Err(err) => {
+            info!("Failed to cleanup posts: {err:?}");
+        }
+    }
 }

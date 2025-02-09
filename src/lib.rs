@@ -12,21 +12,22 @@ use rustrict::CensorStr;
 //
 
 //TODO may do a regex of common words like computer, embedded, etc. Then a more in depth check?
+
 static PROGRAMMER_JARGON: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(Rust|C\+\+|Python|JavaScript|RustLang|Embedded dev|Microcontroller|IoT|Arduino|RaspberryPi|Programming|Developer|Developers|Dev|Hardware|Compiler|OpenSource|GitHub|Linux|Kernel|RTOS|ESP32|Pico|rp\s?2040|rp\s?2350|Micropython|VS Code|JetBrains)\b")
+    Regex::new(r"(?i)\b(Rust|C\+\+|cpp|js|c#|swift|dotnet|php|Python|JavaScript|RustLang|Embedded dev|Microcontroller|IoT|Arduino|RaspberryPi|Programming|Software Developer|Software Developers|Dev|Hardware|Compiler|OpenSource|GitHub|Linux|Kernel|RTOS|ESP32|Pico|rp\s?2040|rp\s?2350|Micropython|VS Code|JetBrains|spi|i2c|soldering|waveshare|maker|adafruit)\b")
         .unwrap()
 });
 
 static BLOG_JARGON: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)\b(blog|post|article|thread|write-up|guide|tutorial|how-to|explainer|deep dive|🧵)\b",
+        r"(?i)\b(blog|post|article|thread|write-up|guide|tutorial|how-to|explainer|deep dive|🧵|working|threads|project)\b",
     )
     .unwrap()
 });
 
 static DO_NOT_POST: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)\b(musk|elon|trump|united states|flordia|texas|doge|government|president|potus|maga)\b",
+        r"(?i)\b(musk|elon|trump|united states|flordia|texas|doge|government|president|potus|maga|vance)\b",
     )
     .unwrap()
 });
@@ -53,8 +54,7 @@ pub fn does_the_post_belong_to_the_feed(all_text_in_post: Vec<TextInPost>) -> Op
             return None;
         }
 
-        //This is all pretty much just open right now plan to fine tune as I find more
-        //But i plan to add weight/scoring to each one a bit differently
+        //TODO check if it has links or like if it found the tech stuff in the link to post, or if in the post and theres replies?
         match text {
             TextInPost::Post(post) => {
                 post_text = post.clone();

@@ -5,6 +5,9 @@ use log::info;
 use tokio_rusqlite::Connection;
 
 pub async fn load_feed_from_db(db: &Connection, limit: u64, offset: u64) -> Vec<DbPost> {
+    //TODO just move to order by timestamp
+    //BUT do a pull on pinned first or above x scoring and put them first?
+    //May long get away with timestamp. Getting too wild
     db.call(move |db| {
         let mut stmt = db
             .prepare(
@@ -19,7 +22,7 @@ pub async fn load_feed_from_db(db: &Connection, limit: u64, offset: u64) -> Vec<
                 FROM posts
                 where posts.deleted = 0
                 GROUP BY posts.uri, posts.text, posts.pinned, posts.deleted, posts.priority
-                ORDER BY  posts.priority desc
+                ORDER BY  posts.timestamp desc
                LIMIT ?1 OFFSET ?2
                  ",
             )

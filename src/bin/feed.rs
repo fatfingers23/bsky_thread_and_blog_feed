@@ -1,20 +1,33 @@
-use atrium_api::types::LimitedNonZeroU8;
+use atrium_api::app::bsky::feed::defs::PostView;
+use atrium_api::app::bsky::feed::get_posts::{Error, Output};
+use atrium_api::client::AtpServiceClient;
+use atrium_api::types::{LimitedNonZeroU8, Unknown};
+use atrium_xrpc_client::reqwest::ReqwestClient;
 use bsky_thread_and_blog_feed::db::{get_posts_count, initialize_db, load_feed_from_db};
 use bsky_thread_and_blog_feed::does_the_post_belong_to_the_feed;
-use bsky_thread_and_blog_feed::models::TextInPost;
-use log::info;
-use skyfeed::{Embed, Feed, FeedHandler, FeedResult, MediaEmbed, Post, Request, Uri};
+use bsky_thread_and_blog_feed::models::{PostScoring, TextInPost};
+use chrono::Utc;
+use dotenv::dotenv;
+use ipld_core::ipld::Ipld;
+use log::{error, info};
+use skyfeed::{Did, Embed, Feed, FeedHandler, FeedResult, MediaEmbed, Post, Request, Uri};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_rusqlite::{Connection, params};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenv().ok();
     let db = Connection::open("./feed.db").await?;
     initialize_db(&db).await;
-
+    let client = AtpServiceClient::new(ReqwestClient::new("https://public.api.bsky.app"));
+    let publisher_did = std::env::var("PUBLISHER_DID").expect("PUBLISHER_DID not set");
     let mut feed = MyFeed {
-        handler: MyFeedHandler { db: db.clone() },
+        handler: MyFeedHandler {
+            db: db.clone(),
+            bsky_client: Arc::new(Mutex::new(client)),
+            feed_author_did: publisher_did,
+        },
     };
 
     let mut cleanup_interval = tokio::time::interval(Duration::from_secs(10));
@@ -46,6 +59,8 @@ impl Feed<MyFeedHandler> for MyFeed {
 #[derive(Clone)]
 struct MyFeedHandler {
     db: Connection,
+    bsky_client: Arc<Mutex<AtpServiceClient<ReqwestClient>>>,
+    feed_author_did: String,
 }
 
 impl FeedHandler for MyFeedHandler {
@@ -105,8 +120,69 @@ impl FeedHandler for MyFeedHandler {
             .unwrap();
     }
 
-    async fn like_post(&mut self, like_uri: Uri, liked_post_uri: Uri) {
-        //TODO this is every single like. Maybe need to doa  in memory check instead of sqlite?
+    async fn like_post(&mut self, like_uri: Uri, liked_post_uri: Uri, user_who_liked: Did) {
+        if user_who_liked.0 == self.feed_author_did {
+            info!("Hey you just liked something");
+
+            let client = self.bsky_client.lock().await;
+            let get_posts_call = client
+                .service
+                .app
+                .bsky
+                .feed
+                .get_posts(
+                    atrium_api::app::bsky::feed::get_posts::ParametersData {
+                        uris: vec![liked_post_uri.0.clone()],
+                    }
+                    .into(),
+                )
+                .await;
+
+            match get_posts_call {
+                Ok(result) => {
+                    for post in result.posts.clone() {
+                        let post_text: String = match &post.record {
+                            Unknown::Object(map) => match map.get("text") {
+                                Some(data_model) => match &**data_model {
+                                    Ipld::String(text) => text.clone(),
+                                    Ipld::Null => "(Null content)".to_string(),
+                                    other => format!("(Unexpected format: {:?})", other),
+                                },
+                                None => "(No text content)".to_string(),
+                            },
+                            Unknown::Null => "No post content".to_string(),
+                            Unknown::Other(_) => "Other?".to_string(),
+                        };
+
+                        let scoring = does_the_post_belong_to_the_feed(vec![TextInPost::Post(
+                            post_text.clone(),
+                        )]);
+
+                        //TODO DRY
+                        match scoring {
+                            None => {}
+                            Some(score) => {
+                                let dt = Utc::now();
+                                let timestamp: i64 = dt.timestamp();
+                                self.db
+                                    .call(move |db| {
+                                        db.execute(
+                                            "INSERT OR REPLACE INTO posts (uri, text, pinned, deleted, priority, timestamp) VALUES (?1, ?2, 0, 0, ?3, ?4)",
+                                            params![ &post.uri, &post_text, score.priority, &timestamp],
+                                        ).map_err(|err| err.into())
+                                    })
+                                    .await
+                                    .unwrap();
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!("{}", err);
+                }
+            }
+        }
+
         self.db
             .call(move |db| {
                 db.execute(
@@ -149,9 +225,9 @@ impl FeedHandler for MyFeedHandler {
 
         let post_uris =
             load_feed_from_db(&self.db, posts_per_page as u64, start_index as u64).await;
-        let posts: Vec<Uri> = post_uris.into_iter().map(|post| Uri(post.uri)).collect();
+        let mut posts: Vec<Uri> = post_uris.into_iter().map(|post| Uri(post.uri)).collect();
+        //TODO prepane the pinned post? Manually? idk
 
-        //TODO get real post len but going to use 75
         let total_posts: u64 = get_posts_count(&self.db).await;
         let next_cursor = if (start_index as u64) + (posts_per_page as u64) < total_posts {
             Some(((start_index as u64) + (posts_per_page as u64)).to_string())

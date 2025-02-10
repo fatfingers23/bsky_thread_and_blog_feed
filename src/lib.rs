@@ -27,7 +27,7 @@ static BLOG_JARGON: Lazy<Regex> = Lazy::new(|| {
 
 static DO_NOT_POST: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)\b(musk|elon|trump|united states|flordia|texas|doge|government|president|potus|maga|vance)\b",
+        r"(?i)\b(musk|elon|trump|united states|flordia|texas|doge|government|president|potus|maga|vance|super bowl)\b",
     )
     .unwrap()
 });

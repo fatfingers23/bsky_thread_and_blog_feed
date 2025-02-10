@@ -27,7 +27,7 @@ pub async fn load_feed_from_db(db: &Connection, limit: u64, offset: u64) -> Vec<
                  ",
             )
             .expect("Failed to prepare statement");
-        Ok(stmt
+        let result = Ok(stmt
             .query_map([&limit.clone(), &offset.clone()], |row| {
                 Ok(DbPost {
                     uri: row.get(0)?,
@@ -39,7 +39,8 @@ pub async fn load_feed_from_db(db: &Connection, limit: u64, offset: u64) -> Vec<
                     // timestamp: Utc.timestamp(row.get(5)?, 0),
                 })
             })?
-            .collect::<Result<Vec<DbPost>, _>>()?)
+            .collect::<Result<Vec<DbPost>, _>>()?);
+        result
     })
     .await
     .unwrap()

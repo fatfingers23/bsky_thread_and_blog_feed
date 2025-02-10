@@ -10,13 +10,13 @@ use ratatui::style::palette::tailwind;
 use ratatui::text::Text;
 use ratatui::widgets::Cell;
 use ratatui::{
-    DefaultTerminal, Frame,
     buffer::Buffer,
     crossterm::event::{Event, EventStream, KeyCode, KeyEventKind},
     layout::{Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
     text::Line,
     widgets::{Block, HighlightSpacing, Row, StatefulWidget, Table, TableState, Widget},
+    DefaultTerminal, Frame,
 };
 use skyfeed::Uri;
 use std::{
@@ -40,6 +40,8 @@ async fn main() -> Result<()> {
             state: Arc::new(RwLock::new(FeedPostState::default())),
             db: connection,
             bsky_client: Arc::new(Mutex::new(client)),
+            feed_offset: 0,
+            feed_limit: 25,
         },
     };
     let app_result = app.run(terminal).await;
@@ -85,7 +87,9 @@ impl App {
             if key.kind == KeyEventKind::Press {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-                    KeyCode::Char('j') | KeyCode::Down => self.feed_display.scroll_down(),
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.feed_display.clone().scroll_down().await
+                    }
                     KeyCode::Char('k') | KeyCode::Up => self.feed_display.scroll_up(),
                     KeyCode::Char('r') => self.feed_display.clone().fetch_posts().await,
                     KeyCode::Enter => self.feed_display.open_post(),
@@ -104,6 +108,8 @@ struct FeedDisplayWidget {
     state: Arc<RwLock<FeedPostState>>,
     db: Connection,
     bsky_client: Arc<Mutex<AtpServiceClient<ReqwestClient>>>,
+    feed_offset: u64,
+    feed_limit: u64,
 }
 
 #[derive(Debug, Default)]
@@ -137,7 +143,7 @@ impl FeedDisplayWidget {
     pub async fn fetch_posts(self) {
         self.set_loading_state(LoadingState::Loading);
 
-        let posts = load_feed_from_db(&self.db, 25, 0).await;
+        let posts = load_feed_from_db(&self.db, self.feed_limit, self.feed_offset).await;
 
         let posts_uris: Vec<String> = posts.iter().map(|post| post.uri.clone()).collect();
 
@@ -183,8 +189,14 @@ impl FeedDisplayWidget {
         self.state.write().unwrap().loading_state = state;
     }
 
-    fn scroll_down(&self) {
+    pub async fn scroll_down(&mut self) {
         self.state.write().unwrap().table_state.scroll_down_by(1);
+        let last_post_index = self.state.read().unwrap().posts.len() - 1;
+        let current = self.state.read().unwrap().table_state.selected().unwrap() - 1;
+        if current >= last_post_index {
+            self.feed_offset += self.feed_limit;
+            self.clone().fetch_posts().await;
+        }
     }
 
     fn scroll_up(&self) {
@@ -227,7 +239,7 @@ impl Widget for &FeedDisplayWidget {
         let block = Block::bordered()
             .title("Posts currently showing in the feed")
             .title(loading_state)
-            .title_bottom("j/k to scroll | r to refresh | p to pin | d to delete | q to quit");
+            .title_bottom("j/k to scroll | r to refresh | d to delete | q to quit");
 
         let post_content = state.posts.iter().enumerate().map(|(i, post_view)| {
             let post_text: String = match &post_view.record {
@@ -247,10 +259,10 @@ impl Widget for &FeedDisplayWidget {
             let author_string = author.as_str();
             let likes = post_view.like_count.unwrap_or(0);
 
-            let mut pinned = "📌";
-            if i > 0 {
-                pinned = "";
-            }
+            // let mut pinned = "📌";
+            // if i > 0 {
+            //     pinned = "";
+            // }
 
             let media_type = match post_view.embed.clone() {
                 None => "🗒️",
@@ -271,9 +283,9 @@ impl Widget for &FeedDisplayWidget {
                 0 => tailwind::SLATE.c800,
                 _ => tailwind::SLATE.c900,
             };
-
+            let url = format!("https://atp.tools/{}", post_view.uri);
             [Cell::from(Text::from(format!(
-                "{pinned}{one_liner}\n@{author_string} | {likes} likes | {media_type}"
+                "{one_liner}\n@{author_string} | {likes} likes | {media_type}\n{url}"
             )))]
             .into_iter()
             .collect::<Row>()

@@ -13,7 +13,7 @@ use log::{error, info};
 use skyfeed::{Did, Embed, Feed, FeedHandler, FeedResult, MediaEmbed, Post, Request, Uri};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
-use tokio_rusqlite::{Connection, params};
+use tokio_rusqlite::{params, Connection};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     tokio::join!(
-        feed.start("TechThreadsAndMore", ([0, 0, 0, 0], 3030)),
+        feed.start("TechThreadsAndMore", ([192, 168, 1, 221], 3030)),
         cleanup_task
     )
     .1
@@ -200,9 +200,10 @@ impl FeedHandler for MyFeedHandler {
     async fn delete_like(&mut self, like_uri: Uri) {
         self.db
             .call(move |db| {
-                db.execute("DELETE FROM likes WHERE like_uri = ?1", params![
-                    &like_uri.0
-                ])
+                db.execute(
+                    "DELETE FROM likes WHERE like_uri = ?1",
+                    params![&like_uri.0],
+                )
                 .map_err(|err| err.into())
             })
             .await
